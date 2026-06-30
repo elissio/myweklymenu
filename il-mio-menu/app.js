@@ -10,6 +10,7 @@ let STATE = {
   prefs: null,        // preferenze scelte
   celle: [],          // [{ giorno, slot, ricettaId }]
   spuntati: {},       // voci barrate nella lista della spesa
+  giaInCasa: {},      // quantità già in casa per voce (key "categoria|nome" -> numero)
   raggruppa: true,    // lista spesa raggruppata per reparto
   filtroPasto: "tutti",
 };
@@ -275,7 +276,7 @@ function generaPiano() {
     }
   }
 
-  STATE = { prefs, celle, spuntati: {}, raggruppa: STATE.raggruppa, filtroPasto: "tutti" };
+  STATE = { prefs, celle, spuntati: {}, giaInCasa: {}, raggruppa: STATE.raggruppa, filtroPasto: "tutti" };
   salvaInMemoria();
   abilitaPiano();
   renderTutto();
@@ -698,6 +699,23 @@ function aggregaSpesa() {
       else agg[key].altri.push(ing.quantita);
     });
   });
+  // "Ne ho già a casa": per ogni voce calcola la quantità piena (unità principale) e
+  // sottrai quanto già posseduto, riducendo quantità e prezzo in proporzione.
+  Object.entries(agg).forEach(([key, v]) => {
+    const unita = Object.keys(v.unita);
+    v.unitaPrimaria = unita.length ? unita[0] : null;
+    v.totaleOrig = v.unitaPrimaria != null ? v.unita[v.unitaPrimaria] : null;
+    const owned = (STATE.giaInCasa && STATE.giaInCasa[key]) || 0;
+    if (owned > 0 && v.unitaPrimaria != null) {
+      const oldQ = v.unita[v.unitaPrimaria];
+      const newQ = Math.max(0, oldQ - owned);
+      if (oldQ > 0) v.prezzo = v.prezzo * (newQ / oldQ);
+      v.unita[v.unitaPrimaria] = newQ;
+      v.giaInCasa = owned;
+      const restano = Object.values(v.unita).some(x => x > 0) || (v.altri && v.altri.length);
+      if (!restano) v.esaurito = true;
+    }
+  });
   return agg;
 }
 
@@ -737,22 +755,56 @@ function renderSpesa() {
 
 function rigaVoce(v) {
   const key = v.categoria + "|" + v.nome;
+  const riga = document.createElement("div");
+
+  // Voce interamente "già in casa": niente da comprare.
+  if (v.esaurito) {
+    riga.className = "voce esaurito";
+    riga.innerHTML = `
+      <span class="testo"><b>${v.nome}</b> <small style="color:var(--verde-scuro)">ce l'hai già a casa</small></span>
+      <span class="riga-azioni"><button class="btn-casa" title="Modifica quanto hai già">🏠</button><span class="prezzo">${euro(0)}</span></span>`;
+    riga.querySelector(".btn-casa").addEventListener("click", () => chiediGiaInCasa(v, key));
+    return riga;
+  }
+
   const spuntato = !!STATE.spuntati[key];
   const qta = formattaQuantita(v);
-  const riga = document.createElement("div");
+  const notaCasa = v.giaInCasa > 0 ? ` <small style="color:var(--ambra)">(ne hai già ${formattaNumero(v.giaInCasa)})</small>` : "";
   riga.className = "voce" + (spuntato ? " check" : "");
   riga.innerHTML = `
     <label>
       <input type="checkbox" ${spuntato ? "checked" : ""}>
-      <span class="testo"><b>${v.nome}</b>${qta ? " · " + qta : ""}</span>
+      <span class="testo"><b>${v.nome}</b>${qta ? " · " + qta : ""}${notaCasa}</span>
     </label>
-    <span class="prezzo">${euro(v.prezzo)}</span>`;
+    <span class="riga-azioni">
+      <button class="btn-casa" title="Ne ho già un po' a casa">🏠</button>
+      <span class="prezzo">${euro(v.prezzo)}</span>
+    </span>`;
   riga.querySelector("input").addEventListener("change", e => {
     STATE.spuntati[key] = e.target.checked;
     riga.classList.toggle("check", e.target.checked);
     salvaInMemoria();
   });
+  riga.querySelector(".btn-casa").addEventListener("click", () => chiediGiaInCasa(v, key));
   return riga;
+}
+
+/* Chiede quanta quantità è già in casa e aggiorna la lista (quantità + prezzo). */
+function chiediGiaInCasa(v, key) {
+  if (v.unitaPrimaria == null) {
+    alert(`Per «${v.nome}» usa il campo "Ingredienti che hai già in casa" nelle Preferenze (questa voce non ha una quantità numerica).`);
+    return;
+  }
+  const u = v.unitaPrimaria ? " " + v.unitaPrimaria : "";
+  const attuale = (STATE.giaInCasa && STATE.giaInCasa[key]) || 0;
+  const risp = prompt(`«${v.nome}» — quanto ne hai GIÀ a casa?\n(in lista ne servono ${formattaNumero(v.totaleOrig)}${u})`, attuale || "");
+  if (risp === null) return;
+  const n = Math.max(0, parseFloat(String(risp).replace(",", ".")) || 0);
+  if (!STATE.giaInCasa) STATE.giaInCasa = {};
+  if (n <= 0) delete STATE.giaInCasa[key];
+  else STATE.giaInCasa[key] = Math.min(n, v.totaleOrig);
+  salvaInMemoria();
+  renderSpesa();
 }
 
 function formattaQuantita(v) {
@@ -828,7 +880,8 @@ function linkCondivisione() {
   const base = new Set(RICETTE.filter(r => !r.utente).map(r => r.id));
   const extra = [...new Set(STATE.celle.map(c => c.ricettaId))]
     .filter(id => !base.has(id)).map(id => ricetta(id)).filter(Boolean);
-  const payload = { v: 1, prefs: STATE.prefs, celle: STATE.celle, extra };
+  const payload = { v: 1, prefs: STATE.prefs, celle: STATE.celle, extra,
+    spuntati: STATE.spuntati || {}, giaInCasa: STATE.giaInCasa || {} };
   const code = b64UtfEncode(JSON.stringify(payload))
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   return location.origin + location.pathname + "#lista=" + code;
@@ -866,8 +919,10 @@ function listaTesto() {
     if (!voci) return;
     out.push(cat.toUpperCase());
     voci.sort((a, b) => a.nome.localeCompare(b.nome)).forEach(v => {
+      if (v.esaurito) return; // ce l'hai già: non serve comprarlo
       const q = formattaQuantita(v);
-      out.push(`- ${v.nome}${q ? " · " + q : ""}`);
+      const casa = v.giaInCasa > 0 ? ` (ne hai già ${formattaNumero(v.giaInCasa)})` : "";
+      out.push(`- ${v.nome}${q ? " · " + q : ""}${casa}`);
     });
     out.push("");
   });
@@ -886,11 +941,14 @@ function caricaDaLink() {
     if (!p || !p.prefs || !p.celle || !p.celle.length) return false;
     (p.extra || []).forEach(r => { if (r && r.id && !RICETTE.some(x => x.id === r.id)) RICETTE.push(r); });
     if (!p.prefs.giorni) p.prefs.giorni = 7;
-    STATE = { prefs: p.prefs, celle: p.celle, spuntati: {}, raggruppa: true, filtroPasto: "tutti" };
-    // Se è la stessa lista già aperta su questo telefono, recupera le spunte.
+    STATE = { prefs: p.prefs, celle: p.celle, spuntati: p.spuntati || {}, giaInCasa: p.giaInCasa || {}, raggruppa: true, filtroPasto: "tutti" };
+    // Se è la stessa lista già aperta su questo telefono, tieni i progressi locali.
     try {
       const saved = JSON.parse(localStorage.getItem("menu_state") || "null");
-      if (saved && JSON.stringify(saved.celle) === JSON.stringify(p.celle)) STATE.spuntati = saved.spuntati || {};
+      if (saved && JSON.stringify(saved.celle) === JSON.stringify(p.celle)) {
+        STATE.spuntati = saved.spuntati || STATE.spuntati;
+        STATE.giaInCasa = saved.giaInCasa || STATE.giaInCasa;
+      }
     } catch (e) {}
     abilitaPiano();
     renderTutto();
@@ -913,7 +971,7 @@ function caricaDaMemoria() {
     const s = JSON.parse(raw);
     if (!s.prefs || !s.celle || !s.celle.length) return;
     STATE = {
-      prefs: s.prefs, celle: s.celle, spuntati: s.spuntati || {},
+      prefs: s.prefs, celle: s.celle, spuntati: s.spuntati || {}, giaInCasa: s.giaInCasa || {},
       raggruppa: s.raggruppa !== false, filtroPasto: s.filtroPasto || "tutti",
     };
     const p = STATE.prefs;
