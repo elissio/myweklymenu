@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "il-mio-menu",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["il-mio-menu/server.py"],
+      "port": 4173
+    }
+  ]
+}

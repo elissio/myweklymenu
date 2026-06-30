@@ -1,0 +1,9 @@
+# Sistema
+.DS_Store
+
+# Scontrini personali: NON versionare le immagini (dati sensibili)
+scontrini-lidl/*.png
+scontrini-lidl/*.jpg
+scontrini-lidl/*.jpeg
+scontrini-lidl/*.heic
+scontrini-lidl/*.pdf
