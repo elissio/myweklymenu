@@ -1,7 +1,7 @@
 # Il mio menu settimanale
 
 Web app personale per creare un **menu di 7 giorni** e la **lista della spesa**,
-ispirata all'app Kumino. Funziona interamente nel browser: nessun server,
+ispirata alle app di pianificazione pasti. Funziona interamente nel browser: nessun server,
 nessun account, i dati restano sul tuo dispositivo.
 
 ## Come aprirla
@@ -38,7 +38,7 @@ ricette della libreria con ricerca e filtro per pasto; clicca per la scheda comp
 
 I dati del piano e il tema vengono salvati automaticamente: riaprendo l'app li ritrovi.
 
-## Funzioni rispetto a Kumino
+## Funzioni principali
 Già presenti: supermercati colorati (Lidl default), elettrodomestici, dieta/allergeni,
 **obiettivo nutrizionale** (più proteine / equilibrato / leggero), ingredienti da
 evitare, dispensa, **pranzo da ufficio** (solo piatti riscaldabili al microonde),
