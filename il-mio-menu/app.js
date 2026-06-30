@@ -22,6 +22,7 @@ document.addEventListener("DOMContentLoaded", () => {
   collegaEventi();
   caricaRicetteImportate();
   caricaRicetteUtente();
+  caricaRicetteDaLink();
   buildFormRicetta();
   renderRicettarioFiltro();
   renderRicettario();
@@ -88,7 +89,7 @@ function collegaEventi() {
   document.querySelectorAll(".tab").forEach(t =>
     t.addEventListener("click", () => { if (!t.disabled) mostraSchermata(t.dataset.tab); }));
   document.getElementById("btn-genera").addEventListener("click", generaPiano);
-  document.getElementById("btn-rigenera-tutto").addEventListener("click", generaPiano);
+  document.getElementById("btn-rigenera-tutto").addEventListener("click", rigeneraTutto);
   document.getElementById("btn-vai-spesa").addEventListener("click", () => mostraSchermata("spesa"));
   document.getElementById("overlay").addEventListener("click", e => { if (e.target.id === "overlay") chiudiModal(); });
 
@@ -217,9 +218,16 @@ function costoRicetta(r, prefs) {
 }
 
 /* ---------------------- GENERAZIONE PIANO ---------------------- */
+function rigeneraTutto() {
+  if (STATE.celle && STATE.celle.length &&
+      !confirm("Rigenero tutto il piano da capo?\nPerderai i piatti cambiati a mano, le spunte e i \"ne ho già\".")) return;
+  generaPiano();
+}
 function generaPiano() {
   const prefs = leggiPreferenze();
   if (prefs.slot.length === 0) { alert("Seleziona almeno un pasto da pianificare."); return; }
+  prefs.planId = "p" + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36); // id unico del piano
+  prefs.rev = 0; // revisione: cresce ad ogni modifica (cambio piatto, "ne ho già", spunta)
 
   const pools = {};
   for (const slot of prefs.slot) {
@@ -324,8 +332,20 @@ function rigeneraPiatto(giorno, slot) {
   if (!scelta.length) return;
   cella.ricettaId = scelta[Math.floor(Math.random() * scelta.length)].id;
   if (linkPranzo) linkPranzo.ricettaId = cella.ricettaId; // tieni in sync il pranzo di domani
+  potaChiaviOrfane(); // togli "ne ho già"/spunte di ingredienti non più nel piano
+  segnaModifica();
   salvaInMemoria();
   renderTutto();
+}
+
+/* Rimuove dalle spunte e da "ne ho già" le voci non più presenti nel piano,
+   così una quantità "ne ho già" non riemerge a sorpresa su un piatto diverso. */
+function potaChiaviOrfane() {
+  const valide = new Set(Object.keys(aggregaSpesa()));
+  ["giaInCasa", "spuntati"].forEach(campo => {
+    if (!STATE[campo]) return;
+    Object.keys(STATE[campo]).forEach(k => { if (!valide.has(k)) delete STATE[campo][k]; });
+  });
 }
 
 function abilitaPiano() {
@@ -406,6 +426,7 @@ function renderPiano() {
       const cella = STATE.celle.find(c => c.giorno === g && c.slot === slot);
       if (!cella) return;
       const r = ricetta(cella.ricettaId);
+      if (!r) return; // ricetta non disponibile (es. personale mancante): salta senza crashare
       const pasto = document.createElement("div");
       pasto.className = "pasto";
       const nota = cella.avanzo
@@ -499,6 +520,25 @@ function renderRicettario() {
 function caricaRicetteImportate() {
   if (typeof RICETTE_IMPORTATE === "undefined") return;
   RICETTE_IMPORTATE.forEach(r => { if (r && r.id && !RICETTE.some(x => x.id === r.id)) RICETTE.push(r); });
+}
+
+/* Ricette personali ricevute dentro un link condiviso: persistite così il piano
+   condiviso non si rompe al refresh sul dispositivo del destinatario. */
+const CHIAVE_RICETTE_LINK = "menu_ricette_link";
+function caricaRicetteDaLink() {
+  try {
+    JSON.parse(localStorage.getItem(CHIAVE_RICETTE_LINK) || "[]")
+      .forEach(r => { if (r && r.id && !RICETTE.some(x => x.id === r.id)) RICETTE.push(r); });
+  } catch (e) {}
+}
+function salvaRicetteDaLink(extra) {
+  extra.forEach(r => { if (r && r.id && !RICETTE.some(x => x.id === r.id)) RICETTE.push(r); });
+  try {
+    const arr = JSON.parse(localStorage.getItem(CHIAVE_RICETTE_LINK) || "[]");
+    const ids = new Set(arr.map(r => r.id));
+    extra.forEach(r => { if (r && r.id && !ids.has(r.id)) { arr.push(r); ids.add(r.id); } });
+    localStorage.setItem(CHIAVE_RICETTE_LINK, JSON.stringify(arr));
+  } catch (e) {}
 }
 
 /* ---------------------- RICETTE PERSONALI ---------------------- */
@@ -689,7 +729,9 @@ function aggregaSpesa() {
   const m = getSupermercato(p.supermercato).moltiplicatore;
   const agg = {};
   STATE.celle.forEach(c => {
-    ricetta(c.ricettaId).ingredienti.forEach(ing => {
+    const ric = ricetta(c.ricettaId);
+    if (!ric) return; // ricetta non disponibile: salta senza crashare
+    ric.ingredienti.forEach(ing => {
       if (inDispensa(ing.nome, p)) return; // già in casa: salta
       const key = ing.categoria + "|" + ing.nome;
       if (!agg[key]) agg[key] = { categoria: ing.categoria, nome: ing.nome, prezzo: 0, unita: {}, altri: [] };
@@ -783,6 +825,7 @@ function rigaVoce(v) {
   riga.querySelector("input").addEventListener("change", e => {
     STATE.spuntati[key] = e.target.checked;
     riga.classList.toggle("check", e.target.checked);
+    segnaModifica();
     salvaInMemoria();
   });
   riga.querySelector(".btn-casa").addEventListener("click", () => chiediGiaInCasa(v, key));
@@ -803,6 +846,7 @@ function chiediGiaInCasa(v, key) {
   if (!STATE.giaInCasa) STATE.giaInCasa = {};
   if (n <= 0) delete STATE.giaInCasa[key];
   else STATE.giaInCasa[key] = Math.min(n, v.totaleOrig);
+  segnaModifica();
   salvaInMemoria();
   renderSpesa();
 }
@@ -939,17 +983,23 @@ function caricaDaLink() {
     while (b64.length % 4) b64 += "=";
     const p = JSON.parse(b64UtfDecode(b64));
     if (!p || !p.prefs || !p.celle || !p.celle.length) return false;
-    (p.extra || []).forEach(r => { if (r && r.id && !RICETTE.some(x => x.id === r.id)) RICETTE.push(r); });
+    salvaRicetteDaLink(p.extra || []); // ricette personali nel link: aggiungile e persistile (reggono al refresh)
     if (!p.prefs.giorni) p.prefs.giorni = 7;
-    STATE = { prefs: p.prefs, celle: p.celle, spuntati: p.spuntati || {}, giaInCasa: p.giaInCasa || {}, raggruppa: true, filtroPasto: "tutti" };
-    // Se è la stessa lista già aperta su questo telefono, tieni i progressi locali.
-    try {
-      const saved = JSON.parse(localStorage.getItem("menu_state") || "null");
-      if (saved && JSON.stringify(saved.celle) === JSON.stringify(p.celle)) {
-        STATE.spuntati = saved.spuntati || STATE.spuntati;
-        STATE.giaInCasa = saved.giaInCasa || STATE.giaInCasa;
-      }
-    } catch (e) {}
+    // Questo dispositivo ha già questo piano (stesso planId) ed è uguale o più
+    // aggiornato? Allora tieni la TUA copia (piatti cambiati, spunte, "ne ho già")
+    // invece di sovrascriverla con la "foto" congelata del link.
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem("menu_state") || "null"); } catch (e) {}
+    const stessoPiano = saved && saved.prefs && p.prefs.planId && saved.prefs.planId === p.prefs.planId;
+    if (stessoPiano && (saved.prefs.rev || 0) >= (p.prefs.rev || 0)) {
+      STATE = {
+        prefs: saved.prefs, celle: saved.celle,
+        spuntati: saved.spuntati || {}, giaInCasa: saved.giaInCasa || {},
+        raggruppa: saved.raggruppa !== false, filtroPasto: saved.filtroPasto || "tutti",
+      };
+    } else {
+      STATE = { prefs: p.prefs, celle: p.celle, spuntati: p.spuntati || {}, giaInCasa: p.giaInCasa || {}, raggruppa: true, filtroPasto: "tutti" };
+    }
     abilitaPiano();
     renderTutto();
     mostraSchermata("spesa");
@@ -964,6 +1014,9 @@ function caricaDaLink() {
 }
 
 /* ---------------------- SALVATAGGIO ---------------------- */
+// Aumenta la "revisione" del piano: fa vincere la copia locale modificata quando
+// si riapre un vecchio link condiviso (vedi caricaDaLink).
+function segnaModifica() { if (STATE.prefs) STATE.prefs.rev = (STATE.prefs.rev || 0) + 1; }
 function salvaInMemoria() {
   try { localStorage.setItem("menu_state", JSON.stringify(STATE)); } catch (e) {}
 }
