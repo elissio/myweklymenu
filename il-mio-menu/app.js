@@ -160,7 +160,16 @@ function leggiPreferenze() {
     pranzoUfficio: document.getElementById("tg-ufficio").checked,
     nientePiccante: document.getElementById("tg-piccante").checked,
     soloStagione: document.getElementById("tg-stagione").checked,
+    cucinaDoppio: document.getElementById("tg-batch").checked,
+    dataInizio: oggiISO(),
   };
+}
+
+// Data di oggi in formato YYYY-MM-DD (locale): ancora il piano al giorno di partenza.
+function oggiISO() {
+  const d = new Date();
+  const due = n => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${due(d.getMonth() + 1)}-${due(d.getDate())}`;
 }
 
 function stagioneCorrente() {
@@ -220,6 +229,12 @@ function generaPiano() {
     }
   }
 
+  // "Cucina la sera, pranzo pronto domani": la cena del giorno N diventa il pranzo
+  // del giorno N+1 (stesso piatto = una cucinata, due pasti). Attivo solo se pianifichi
+  // sia pranzo sia cena. Le cene "trasportate" devono valere anche come pranzo (ufficio).
+  const cucinaDoppio = prefs.cucinaDoppio && prefs.slot.includes("pranzo") && prefs.slot.includes("cena");
+  const poolCenaPranzo = cucinaDoppio ? pools["cena"].filter(r => ricettaValida(r, "pranzo", prefs)) : null;
+
   // La colazione pesa meno di pranzo/cena: così pranzo e cena ricevono più
   // budget e possono ospitare piatti più proteici restando nel totale.
   const PESO = { colazione: 0.7, pranzo: 1.35, cena: 1.35 };
@@ -229,17 +244,34 @@ function generaPiano() {
   const usage = {};
   const celle = [];
   let speso = 0;
+  let avanzoCena = null; // ricettaId della cena di ieri, da servire oggi a pranzo
   for (let g = 0; g < prefs.giorni; g++) {
     const usateOggi = [];
+    const ultimoGiorno = g === prefs.giorni - 1;
     for (const slot of prefs.slot) {
       const w = PESO[slot] || 1;
+
+      if (cucinaDoppio && slot === "pranzo" && avanzoCena) {
+        // Pranzo = avanzo della cena di ieri: stesso piatto, nessuna nuova scelta.
+        usateOggi.push(avanzoCena);
+        speso += costoRicetta(ricetta(avanzoCena), prefs);
+        pesoRimanente -= w;
+        celle.push({ giorno: g, slot, ricettaId: avanzoCena, avanzo: true });
+        continue;
+      }
+
+      // Le cene che faranno da pranzo domani: scegli tra quelle valide per entrambi.
+      const portaDomani = cucinaDoppio && slot === "cena" && !ultimoGiorno;
+      const pool = (portaDomani && poolCenaPranzo.length) ? poolCenaPranzo : pools[slot];
       const target = pesoRimanente > 0 ? Math.max(0, (prefs.budget - speso) * (w / pesoRimanente)) : 0;
-      const r = scegliRicetta(pools[slot], usage, usateOggi, target, prefs);
+      const r = scegliRicetta(pool, usage, usateOggi, target, prefs);
       usage[r.id] = (usage[r.id] || 0) + 1;
       usateOggi.push(r.id);
       speso += costoRicetta(r, prefs);
       pesoRimanente -= w;
-      celle.push({ giorno: g, slot, ricettaId: r.id });
+      const cella = { giorno: g, slot, ricettaId: r.id };
+      if (portaDomani) { cella.portaDomani = true; avanzoCena = r.id; }
+      celle.push(cella);
     }
   }
 
@@ -278,11 +310,19 @@ function ricetta(id) { return RICETTE.find(r => r.id === id); }
 
 function rigeneraPiatto(giorno, slot) {
   const prefs = STATE.prefs;
-  const pool = RICETTE.filter(r => ricettaValida(r, slot, prefs));
   const cella = STATE.celle.find(c => c.giorno === giorno && c.slot === slot);
+  if (!cella || cella.avanzo) return; // gli avanzi sono legati alla cena: non si rigenerano da soli
+  // Se è una cena che diventa pranzo domani, scegli tra le valide per entrambi i pasti.
+  const linkPranzo = cella.portaDomani
+    ? STATE.celle.find(c => c.giorno === giorno + 1 && c.slot === "pranzo" && c.avanzo)
+    : null;
+  let pool = RICETTE.filter(r => ricettaValida(r, slot, prefs));
+  if (linkPranzo) pool = pool.filter(r => ricettaValida(r, "pranzo", prefs));
   const alternative = pool.filter(r => r.id !== cella.ricettaId);
   const scelta = alternative.length ? alternative : pool;
+  if (!scelta.length) return;
   cella.ricettaId = scelta[Math.floor(Math.random() * scelta.length)].id;
+  if (linkPranzo) linkPranzo.ricettaId = cella.ricettaId; // tieni in sync il pranzo di domani
   salvaInMemoria();
   renderTutto();
 }
@@ -357,29 +397,52 @@ function renderPiano() {
   const slotMostrati = STATE.filtroPasto === "tutti" ? p.slot : [STATE.filtroPasto];
 
   for (let g = 0; g < p.giorni; g++) {
+    const et = etichettaGiorno(g);
     const div = document.createElement("div");
     div.className = "giorno";
-    div.innerHTML = `<h3>${GIORNI[g]}</h3>`;
+    div.innerHTML = `<h3>${et.nome} <small style="font-weight:400;color:var(--grigio)">${et.data}</small></h3>`;
     slotMostrati.forEach(slot => {
       const cella = STATE.celle.find(c => c.giorno === g && c.slot === slot);
       if (!cella) return;
       const r = ricetta(cella.ricettaId);
       const pasto = document.createElement("div");
       pasto.className = "pasto";
+      const nota = cella.avanzo
+        ? `<div class="nota-pasto avanzo">↩ avanzo della cena di ieri (solo da scaldare)</div>`
+        : (cella.portaDomani ? `<div class="nota-pasto porta">→ cucinane in più: è anche il pranzo di domani</div>` : "");
+      const azione = cella.avanzo ? "" : `<button class="rigenera" title="Cambia piatto">↻</button>`;
       pasto.innerHTML = `
         <div class="foto">${r.emoji || "🍽️"}</div>
         <div class="info">
           <div class="slot">${SLOT[slot]}</div>
           <div class="nome">${r.nome}</div>
+          ${nota}
           <div class="mini"><span>⏱ ${r.tempo} min</span><span>${euro(costoRicetta(r, p))}</span><span>${r.nutrizione.kcal} kcal</span></div>
         </div>
-        <button class="rigenera" title="Cambia piatto">↻</button>`;
+        ${azione}`;
       pasto.querySelector(".nome").addEventListener("click", () => apriRicetta(r.id));
-      pasto.querySelector(".rigenera").addEventListener("click", () => rigeneraPiatto(g, slot));
+      const btnRig = pasto.querySelector(".rigenera");
+      if (btnRig) btnRig.addEventListener("click", () => rigeneraPiatto(g, slot));
       div.appendChild(pasto);
     });
     griglia.appendChild(div);
   }
+}
+
+/* Etichetta del giorno g: nome del giorno + data, partendo dalla data di generazione. */
+const MESI_ABBR = ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"];
+function dataInizioPiano() {
+  const iso = STATE.prefs && STATE.prefs.dataInizio;
+  if (iso && /^\d{4}-\d{2}-\d{2}$/.test(iso)) {
+    const [y, m, d] = iso.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  }
+  const t = new Date(); t.setHours(0, 0, 0, 0); return t;
+}
+function etichettaGiorno(g) {
+  const base = dataInizioPiano();
+  const d = new Date(base); d.setDate(base.getDate() + g);
+  return { nome: GIORNI[(d.getDay() + 6) % 7], data: `${d.getDate()} ${MESI_ABBR[d.getMonth()]}` };
 }
 
 /* ---------------------- RICETTARIO ---------------------- */
@@ -867,6 +930,7 @@ function caricaDaMemoria() {
     document.getElementById("tg-ufficio").checked = p.pranzoUfficio !== false;
     document.getElementById("tg-piccante").checked = p.nientePiccante !== false;
     document.getElementById("tg-stagione").checked = p.soloStagione !== false;
+    document.getElementById("tg-batch").checked = p.cucinaDoppio !== false;
     document.querySelectorAll("#chips-slot .chip").forEach(c => c.classList.toggle("sel", p.slot.includes(c.dataset.slot)));
     document.querySelectorAll("#equip-grid .equip").forEach(c => c.classList.toggle("sel", (p.equip || []).includes(c.dataset.equip)));
     document.querySelectorAll("#chips-tipi .chip").forEach(c => c.classList.toggle("sel", p.tipi.includes(c.dataset.tipo)));
