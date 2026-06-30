@@ -956,6 +956,9 @@ function caricaDaLink() {
     const banner = document.getElementById("banner-condiviso");
     if (banner) banner.style.display = "block";
     salvaInMemoria();
+    // Togli il #lista=... dall'URL: da ora questo dispositivo usa la sua copia salvata
+    // (modificabile), così un refresh non ricarica più la "foto" condivisa di prima.
+    try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
     return true;
   } catch (e) { return false; }
 }
