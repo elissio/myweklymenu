@@ -3,6 +3,7 @@
    Tutto gira nel browser; i dati restano salvati sul dispositivo (localStorage).
    ========================================================================= */
 
+const APP_VERSION = "v12"; // mostrata in fondo alla pagina: serve a capire se il telefono ha l'ultima versione
 const GIORNI = ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"];
 const ORDINE_SLOT = ["colazione", "pranzo", "cena"];
 
@@ -26,6 +27,7 @@ document.addEventListener("DOMContentLoaded", () => {
   buildFormRicetta();
   renderRicettarioFiltro();
   renderRicettario();
+  const _av = document.getElementById("app-version"); if (_av) _av.textContent = "Il mio menu · " + APP_VERSION;
   // Se apriamo un link "lista condivisa" mostriamo quella; altrimenti il piano salvato.
   if (!caricaDaLink()) caricaDaMemoria();
 });
