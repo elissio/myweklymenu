@@ -328,8 +328,8 @@ function rigeneraPiatto(giorno, slot) {
   let pool = RICETTE.filter(r => ricettaValida(r, slot, prefs));
   if (linkPranzo) pool = pool.filter(r => ricettaValida(r, "pranzo", prefs));
   const alternative = pool.filter(r => r.id !== cella.ricettaId);
-  const scelta = alternative.length ? alternative : pool;
-  if (!scelta.length) return;
+  if (!alternative.length) { alert("Non ci sono altri piatti per questo pasto con i tuoi filtri attuali."); return; }
+  const scelta = alternative;
   cella.ricettaId = scelta[Math.floor(Math.random() * scelta.length)].id;
   if (linkPranzo) linkPranzo.ricettaId = cella.ricettaId; // tieni in sync il pranzo di domani
   potaChiaviOrfane(); // togli "ne ho già"/spunte di ingredienti non più nel piano
@@ -673,7 +673,7 @@ function salvaRicettaUtente() {
   const passi = document.getElementById("nr-passi").value.split("\n").map(s => s.trim()).filter(Boolean);
 
   RICETTE.push({
-    id: "u_" + Date.now(),
+    id: "u_" + Date.now().toString(36) + "_" + Math.floor(Math.random() * 1e6).toString(36),
     nome,
     emoji: document.getElementById("nr-emoji").value.trim() || "🍽️",
     tempo, slot,
@@ -845,7 +845,7 @@ function chiediGiaInCasa(v, key) {
   const n = Math.max(0, parseFloat(String(risp).replace(",", ".")) || 0);
   if (!STATE.giaInCasa) STATE.giaInCasa = {};
   if (n <= 0) delete STATE.giaInCasa[key];
-  else STATE.giaInCasa[key] = Math.min(n, v.totaleOrig);
+  else STATE.giaInCasa[key] = n; // salva la quantità reale posseduta (il taglio avviene in aggregaSpesa)
   segnaModifica();
   salvaInMemoria();
   renderSpesa();
@@ -998,8 +998,10 @@ function caricaDaLink() {
         raggruppa: saved.raggruppa !== false, filtroPasto: saved.filtroPasto || "tutti",
       };
     } else {
-      STATE = { prefs: p.prefs, celle: p.celle, spuntati: p.spuntati || {}, giaInCasa: p.giaInCasa || {}, raggruppa: true, filtroPasto: "tutti" };
+      STATE = { prefs: p.prefs, celle: p.celle, spuntati: p.spuntati || {}, giaInCasa: p.giaInCasa || {},
+        raggruppa: saved ? saved.raggruppa !== false : true, filtroPasto: "tutti" };
     }
+    normalizzaPrefs(STATE.prefs);
     abilitaPiano();
     renderTutto();
     mostraSchermata("spesa");
@@ -1014,6 +1016,12 @@ function caricaDaLink() {
 }
 
 /* ---------------------- SALVATAGGIO ---------------------- */
+// Ripristina gli array attesi se un piano salvato/link è malformato (evita crash).
+function normalizzaPrefs(p) {
+  if (!p) return p;
+  ["slot", "tipi", "allergeni", "equip", "evitare", "dispensa"].forEach(k => { if (!Array.isArray(p[k])) p[k] = []; });
+  return p;
+}
 // Aumenta la "revisione" del piano: fa vincere la copia locale modificata quando
 // si riapre un vecchio link condiviso (vedi caricaDaLink).
 function segnaModifica() { if (STATE.prefs) STATE.prefs.rev = (STATE.prefs.rev || 0) + 1; }
@@ -1032,6 +1040,12 @@ function caricaDaMemoria() {
     };
     const p = STATE.prefs;
     if (!p.giorni) p.giorni = 7; // compatibilità con piani salvati prima dei "giorni"
+    normalizzaPrefs(p);
+    if (!p.planId) { // piano creato prima del planId: assegnalo ora così è protetto anche lui
+      p.planId = "p" + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
+      p.rev = p.rev || 0;
+      salvaInMemoria();
+    }
     // Riapplica le preferenze ai controlli
     document.querySelectorAll("#super-grid .super").forEach(x => x.classList.toggle("sel", x.dataset.id === p.supermercato));
     document.getElementById("persone").value = p.persone;
