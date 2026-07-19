@@ -1,0 +1,20 @@
+{
+  "name": "Il mio menu settimanale",
+  "short_name": "Il mio menu",
+  "description": "Menu settimanale, lista della spesa e budget — dalla libreria di ricette.",
+  "lang": "it",
+  "dir": "ltr",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f6f7f5",
+  "theme_color": "#2e7d52",
+  "categories": ["food", "lifestyle", "shopping"],
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

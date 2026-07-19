@@ -2,8 +2,18 @@
 <html lang="it">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Il mio menu settimanale</title>
+
+  <!-- App installabile (PWA) -->
+  <meta name="theme-color" content="#2e7d52" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="favicon-32.png" sizes="32x32" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Il mio menu" />
   <style>
     :root {
       --verde: #2e7d52;
@@ -45,7 +55,7 @@
     header.top {
       background: var(--verde);
       color: #fff;
-      padding: 18px 20px;
+      padding: calc(18px + env(safe-area-inset-top, 0px)) 20px 18px;
       display: flex;
       align-items: center;
       gap: 12px;
@@ -63,7 +73,7 @@
       width: 38px; height: 38px; border-radius: 10px; font-size: 18px;
     }
     header.top .tema-toggle:hover { background: rgba(255,255,255,.3); }
-    main { max-width: 1000px; margin: 0 auto; padding: 20px 16px 60px; }
+    main { max-width: 1000px; margin: 0 auto; padding: 20px 16px calc(60px + env(safe-area-inset-bottom, 0px)); }
 
     .tabs { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
     .tab {
@@ -237,6 +247,34 @@
 
     <!-- SCHERMATA 1: PREFERENZE -->
     <section class="schermata attiva" id="schermata-prefer">
+      <div class="card" id="card-sync">
+        <h2>📲 Spazio condiviso</h2>
+        <p class="sub">Collega i tuoi dispositivi con un <b>codice famiglia</b>: menu, lista e spunte si aggiornano da soli su tutti (tuo iPhone, quello della tua ragazza, il Mac).</p>
+
+        <div id="sync-nonpronto" style="display:none; background:var(--soft); border-radius:10px; padding:12px; font-size:14px; color:var(--grigio);">
+          🔧 La sincronizzazione è in allestimento: sarà attiva a breve.
+        </div>
+
+        <div id="sync-spento" style="display:none;">
+          <button class="primario" id="btn-crea-spazio" style="margin-top:6px;">✨ Crea uno spazio condiviso</button>
+          <div style="text-align:center; color:var(--grigio); margin:12px 0 8px; font-size:14px;">— oppure inserisci un codice ricevuto —</div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <input type="text" id="sync-codice-input" placeholder="es. casa-4kp2" autocapitalize="off" autocorrect="off" spellcheck="false" style="flex:1; min-width:150px;">
+            <button class="secondario" id="btn-collega">Collega</button>
+          </div>
+        </div>
+
+        <div id="sync-attivo" style="display:none;">
+          <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:6px;">
+            <span>Codice: <b id="sync-codice-vis" style="font-size:17px; letter-spacing:.02em;"></b></span>
+            <button class="secondario" id="btn-copia-codice">📋 Copia</button>
+            <button class="secondario" id="btn-invita">📲 Invita</button>
+          </div>
+          <div id="sync-stato-riga" style="font-size:14px; color:var(--grigio);"></div>
+          <button class="secondario" id="btn-scollega" style="margin-top:12px;">Scollega questo dispositivo</button>
+        </div>
+      </div>
+
       <div class="card">
         <h2>Imposta le tue preferenze</h2>
         <p class="sub">Scegli supermercato, budget e gusti: l'app comporrà un menu di 7 giorni dalla libreria di ricette.</p>
@@ -411,8 +449,43 @@
     <div class="modal" id="modal-ricetta"></div>
   </div>
 
-  <script src="data.js?v=12"></script>
-  <script src="ricette-importate.js?v=12"></script>
-  <script src="app.js?v=12"></script>
+  <script src="data.js"></script>
+  <script src="ricette-importate.js"></script>
+  <script src="sync.js"></script>
+  <script src="app.js"></script>
+
+  <!-- Service worker: tiene l'app aggiornata (prima la rete) e la fa funzionare offline. -->
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("sw.js").then((reg) => reg.update()).catch(() => {});
+      });
+      let inRicarica = false, aggiornamentoInAttesa = false;
+      // Non ricaricare mentre l'utente sta scrivendo (es. una ricetta non ancora
+      // salvata) o ha una finestra aperta: perderebbe quello che sta compilando.
+      function staScrivendo() {
+        const a = document.activeElement;
+        if (a && (a.tagName === "INPUT" || a.tagName === "TEXTAREA" || a.tagName === "SELECT" || a.isContentEditable)) return true;
+        const form = document.getElementById("form-ricetta");
+        if (form && form.style.display !== "none") return true;
+        const ov = document.getElementById("overlay");
+        if (ov && ov.classList.contains("attiva")) return true;
+        return false;
+      }
+      function ricaricaSeSicuro() {
+        if (inRicarica || !aggiornamentoInAttesa || staScrivendo()) return;
+        inRicarica = true;
+        window.location.reload(); // il piano è salvato in localStorage: non si perde nulla
+      }
+      // Un nuovo service worker ha preso il controllo: applica l'aggiornamento al
+      // primo momento sicuro (quando l'utente torna sull'app o smette di scrivere).
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        aggiornamentoInAttesa = true;
+        ricaricaSeSicuro();
+      });
+      document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") ricaricaSeSicuro(); });
+      window.addEventListener("focusout", () => setTimeout(ricaricaSeSicuro, 0));
+    }
+  </script>
 </body>
 </html>

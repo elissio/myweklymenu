@@ -3,18 +3,28 @@
    Tutto gira nel browser; i dati restano salvati sul dispositivo (localStorage).
    ========================================================================= */
 
-const APP_VERSION = "v12"; // mostrata in fondo alla pagina: serve a capire se il telefono ha l'ultima versione
+const APP_VERSION = "v14"; // mostrata in fondo alla pagina: serve a capire se il telefono ha l'ultima versione
 const GIORNI = ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"];
 const ORDINE_SLOT = ["colazione", "pranzo", "cena"];
+// Id delle ricette "di serie" (quelle in data.js + ricette-importate.js, cioè
+// disponibili su ogni dispositivo col sito). Le ricette personali/da-link NON
+// ci sono su tutti i telefoni: vanno spedite dentro ai link e alla sync.
+let IDS_STATICI = null;
 
 let STATE = {
   prefs: null,        // preferenze scelte
   celle: [],          // [{ giorno, slot, ricettaId }]
-  spuntati: {},       // voci barrate nella lista della spesa
-  giaInCasa: {},      // quantità già in casa per voce (key "categoria|nome" -> numero)
+  spuntati: {},       // voci barrate nella lista della spesa (key -> bool)
+  spuntatiT: {},      // orario dell'ultimo cambio di ogni spunta (key -> ms): serve al merge sync per-voce
+  giaInCasa: {},      // quantità già in casa per voce (key "categoria|nome" -> numero, 0 = niente)
+  giaInCasaT: {},     // orario dell'ultimo cambio di ogni "ne ho già" (key -> ms)
   raggruppa: true,    // lista spesa raggruppata per reparto
   filtroPasto: "tutti",
 };
+
+// Timestamp di un cambio locale su spunta / "ne ho già": il merge cross-device
+// sceglie per ogni voce il valore con l'orario più recente (niente perdite).
+function tocca(mappaT, key) { if (mappaT) mappaT[key] = Date.now(); }
 
 /* ---------------------- AVVIO ---------------------- */
 document.addEventListener("DOMContentLoaded", () => {
@@ -22,6 +32,7 @@ document.addEventListener("DOMContentLoaded", () => {
   popolaPreferenze();
   collegaEventi();
   caricaRicetteImportate();
+  IDS_STATICI = new Set(RICETTE.map(r => r.id)); // dopo le importate, prima di utente/link
   caricaRicetteUtente();
   caricaRicetteDaLink();
   buildFormRicetta();
@@ -30,6 +41,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const _av = document.getElementById("app-version"); if (_av) _av.textContent = "Il mio menu · " + APP_VERSION;
   // Se apriamo un link "lista condivisa" mostriamo quella; altrimenti il piano salvato.
   if (!caricaDaLink()) caricaDaMemoria();
+  initSync();
 });
 
 function popolaPreferenze() {
@@ -230,6 +242,7 @@ function generaPiano() {
   if (prefs.slot.length === 0) { alert("Seleziona almeno un pasto da pianificare."); return; }
   prefs.planId = "p" + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36); // id unico del piano
   prefs.rev = 0; // revisione: cresce ad ogni modifica (cambio piatto, "ne ho già", spunta)
+  prefs.ts = Date.now(); // orario di creazione: fa vincere il piano più recente tra dispositivi
 
   const pools = {};
   for (const slot of prefs.slot) {
@@ -286,7 +299,7 @@ function generaPiano() {
     }
   }
 
-  STATE = { prefs, celle, spuntati: {}, giaInCasa: {}, raggruppa: STATE.raggruppa, filtroPasto: "tutti" };
+  STATE = { prefs, celle, spuntati: {}, spuntatiT: {}, giaInCasa: {}, giaInCasaT: {}, raggruppa: STATE.raggruppa, filtroPasto: "tutti" };
   salvaInMemoria();
   abilitaPiano();
   renderTutto();
@@ -344,7 +357,7 @@ function rigeneraPiatto(giorno, slot) {
    così una quantità "ne ho già" non riemerge a sorpresa su un piatto diverso. */
 function potaChiaviOrfane() {
   const valide = new Set(Object.keys(aggregaSpesa()));
-  ["giaInCasa", "spuntati"].forEach(campo => {
+  ["giaInCasa", "giaInCasaT", "spuntati", "spuntatiT"].forEach(campo => {
     if (!STATE[campo]) return;
     Object.keys(STATE[campo]).forEach(k => { if (!valide.has(k)) delete STATE[campo][k]; });
   });
@@ -826,6 +839,8 @@ function rigaVoce(v) {
     </span>`;
   riga.querySelector("input").addEventListener("change", e => {
     STATE.spuntati[key] = e.target.checked;
+    if (!STATE.spuntatiT) STATE.spuntatiT = {};
+    tocca(STATE.spuntatiT, key);
     riga.classList.toggle("check", e.target.checked);
     segnaModifica();
     salvaInMemoria();
@@ -846,8 +861,9 @@ function chiediGiaInCasa(v, key) {
   if (risp === null) return;
   const n = Math.max(0, parseFloat(String(risp).replace(",", ".")) || 0);
   if (!STATE.giaInCasa) STATE.giaInCasa = {};
-  if (n <= 0) delete STATE.giaInCasa[key];
-  else STATE.giaInCasa[key] = n; // salva la quantità reale posseduta (il taglio avviene in aggregaSpesa)
+  STATE.giaInCasa[key] = n; // salva la quantità reale (0 = niente); il taglio avviene in aggregaSpesa
+  if (!STATE.giaInCasaT) STATE.giaInCasaT = {};
+  tocca(STATE.giaInCasaT, key);
   segnaModifica();
   salvaInMemoria();
   renderSpesa();
@@ -919,15 +935,22 @@ function parseQta(q) {
 function b64UtfEncode(s) { return btoa(unescape(encodeURIComponent(s))); }
 function b64UtfDecode(b) { return decodeURIComponent(escape(atob(b))); }
 
+/* Ricette usate dal piano ma NON "di serie" (personali o arrivate da un link):
+   vanno spedite per intero nei link e nella sync, altrimenti sull'altro
+   dispositivo il piano non si può disegnare. */
+function raccogliExtra() {
+  if (!STATE.celle) return [];
+  const statici = IDS_STATICI || new Set();
+  return [...new Set(STATE.celle.map(c => c.ricettaId))]
+    .filter(id => !statici.has(id)).map(id => ricetta(id)).filter(Boolean);
+}
+
 function linkCondivisione() {
   if (!STATE.prefs || !STATE.celle.length) return null;
-  // Le ricette di libreria viaggiano già col sito; includiamo per intero solo
-  // le ricette personali (utente), così il link funziona su qualunque telefono.
-  const base = new Set(RICETTE.filter(r => !r.utente).map(r => r.id));
-  const extra = [...new Set(STATE.celle.map(c => c.ricettaId))]
-    .filter(id => !base.has(id)).map(id => ricetta(id)).filter(Boolean);
+  const extra = raccogliExtra();
   const payload = { v: 1, prefs: STATE.prefs, celle: STATE.celle, extra,
-    spuntati: STATE.spuntati || {}, giaInCasa: STATE.giaInCasa || {} };
+    spuntati: STATE.spuntati || {}, giaInCasa: STATE.giaInCasa || {},
+    spuntatiT: STATE.spuntatiT || {}, giaInCasaT: STATE.giaInCasaT || {} };
   const code = b64UtfEncode(JSON.stringify(payload))
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   return location.origin + location.pathname + "#lista=" + code;
@@ -996,14 +1019,18 @@ function caricaDaLink() {
     if (stessoPiano && (saved.prefs.rev || 0) >= (p.prefs.rev || 0)) {
       STATE = {
         prefs: saved.prefs, celle: saved.celle,
-        spuntati: saved.spuntati || {}, giaInCasa: saved.giaInCasa || {},
+        spuntati: saved.spuntati || {}, spuntatiT: saved.spuntatiT || {},
+        giaInCasa: saved.giaInCasa || {}, giaInCasaT: saved.giaInCasaT || {},
         raggruppa: saved.raggruppa !== false, filtroPasto: saved.filtroPasto || "tutti",
       };
     } else {
-      STATE = { prefs: p.prefs, celle: p.celle, spuntati: p.spuntati || {}, giaInCasa: p.giaInCasa || {},
+      STATE = { prefs: p.prefs, celle: p.celle,
+        spuntati: p.spuntati || {}, spuntatiT: p.spuntatiT || {},
+        giaInCasa: p.giaInCasa || {}, giaInCasaT: p.giaInCasaT || {},
         raggruppa: saved ? saved.raggruppa !== false : true, filtroPasto: "tutti" };
     }
     normalizzaPrefs(STATE.prefs);
+    aggiornaControlliDaPrefs(STATE.prefs); // allinea i controlli Preferenze al piano ricevuto (#11)
     abilitaPiano();
     renderTutto();
     mostraSchermata("spesa");
@@ -1026,9 +1053,16 @@ function normalizzaPrefs(p) {
 }
 // Aumenta la "revisione" del piano: fa vincere la copia locale modificata quando
 // si riapre un vecchio link condiviso (vedi caricaDaLink).
-function segnaModifica() { if (STATE.prefs) STATE.prefs.rev = (STATE.prefs.rev || 0) + 1; }
-function salvaInMemoria() {
+function segnaModifica() { if (STATE.prefs) { STATE.prefs.rev = (STATE.prefs.rev || 0) + 1; STATE.prefs.ts = Date.now(); } }
+// Salva SOLO sul dispositivo (nessuna sincronizzazione): usato quando applichiamo
+// uno stato appena arrivato dalla sync, per non rimandarlo indietro subito.
+function salvaInLocale() {
   try { localStorage.setItem("menu_state", JSON.stringify(STATE)); } catch (e) {}
+}
+// Salva e, se lo spazio condiviso è attivo, propaga la modifica agli altri dispositivi.
+function salvaInMemoria() {
+  salvaInLocale();
+  if (window.SYNC && SYNC.attiva) SYNC.push();
 }
 function caricaDaMemoria() {
   try {
@@ -1037,36 +1071,136 @@ function caricaDaMemoria() {
     const s = JSON.parse(raw);
     if (!s.prefs || !s.celle || !s.celle.length) return;
     STATE = {
-      prefs: s.prefs, celle: s.celle, spuntati: s.spuntati || {}, giaInCasa: s.giaInCasa || {},
+      prefs: s.prefs, celle: s.celle,
+      spuntati: s.spuntati || {}, spuntatiT: s.spuntatiT || {},
+      giaInCasa: s.giaInCasa || {}, giaInCasaT: s.giaInCasaT || {},
       raggruppa: s.raggruppa !== false, filtroPasto: s.filtroPasto || "tutti",
     };
     const p = STATE.prefs;
     if (!p.giorni) p.giorni = 7; // compatibilità con piani salvati prima dei "giorni"
     normalizzaPrefs(p);
+    let migrato = false;
     if (!p.planId) { // piano creato prima del planId: assegnalo ora così è protetto anche lui
       p.planId = "p" + Date.now().toString(36) + Math.floor(Math.random() * 1e6).toString(36);
       p.rev = p.rev || 0;
-      salvaInMemoria();
+      migrato = true;
     }
-    // Riapplica le preferenze ai controlli
-    document.querySelectorAll("#super-grid .super").forEach(x => x.classList.toggle("sel", x.dataset.id === p.supermercato));
-    document.getElementById("persone").value = p.persone;
-    document.getElementById("giorni").value = p.giorni || 7;
-    document.getElementById("budget").value = p.budget;
-    document.getElementById("dieta").value = p.dieta || "";
-    document.getElementById("obiettivo").value = p.obiettivo || "proteico";
-    document.getElementById("evitare").value = (p.evitare || []).join(", ");
-    document.getElementById("dispensa").value = (p.dispensa || []).join(", ");
-    document.getElementById("tg-ufficio").checked = p.pranzoUfficio !== false;
-    document.getElementById("tg-piccante").checked = p.nientePiccante !== false;
-    document.getElementById("tg-stagione").checked = p.soloStagione !== false;
-    document.getElementById("tg-batch").checked = p.cucinaDoppio !== false;
-    document.querySelectorAll("#chips-slot .chip").forEach(c => c.classList.toggle("sel", p.slot.includes(c.dataset.slot)));
-    document.querySelectorAll("#equip-grid .equip").forEach(c => c.classList.toggle("sel", (p.equip || []).includes(c.dataset.equip)));
-    document.querySelectorAll("#chips-tipi .chip").forEach(c => c.classList.toggle("sel", p.tipi.includes(c.dataset.tipo)));
-    document.querySelectorAll("#chips-allergeni .chip").forEach(c => c.classList.toggle("sel", p.allergeni.includes(c.dataset.allergene)));
-
+    if (!p.ts) { p.ts = Date.now(); migrato = true; } // senza ts il piano perderebbe sempre nel merge sync (#9)
+    if (migrato) salvaInLocale();
+    aggiornaControlliDaPrefs(p);
     abilitaPiano();
     renderTutto();
   } catch (e) { /* salvataggio corrotto: si riparte da capo */ }
+}
+
+/* Riflette le preferenze del piano sui controlli della schermata Preferenze.
+   Condiviso da caricaDaMemoria e da applicaStatoRemoto (sync). */
+function aggiornaControlliDaPrefs(p) {
+  if (!p) return;
+  document.querySelectorAll("#super-grid .super").forEach(x => x.classList.toggle("sel", x.dataset.id === p.supermercato));
+  document.getElementById("persone").value = p.persone;
+  document.getElementById("giorni").value = p.giorni || 7;
+  document.getElementById("budget").value = p.budget;
+  document.getElementById("dieta").value = p.dieta || "";
+  document.getElementById("obiettivo").value = p.obiettivo || "proteico";
+  document.getElementById("evitare").value = (p.evitare || []).join(", ");
+  document.getElementById("dispensa").value = (p.dispensa || []).join(", ");
+  document.getElementById("tg-ufficio").checked = p.pranzoUfficio !== false;
+  document.getElementById("tg-piccante").checked = p.nientePiccante !== false;
+  document.getElementById("tg-stagione").checked = p.soloStagione !== false;
+  document.getElementById("tg-batch").checked = p.cucinaDoppio !== false;
+  document.querySelectorAll("#chips-slot .chip").forEach(c => c.classList.toggle("sel", (p.slot || []).includes(c.dataset.slot)));
+  document.querySelectorAll("#equip-grid .equip").forEach(c => c.classList.toggle("sel", (p.equip || []).includes(c.dataset.equip)));
+  document.querySelectorAll("#chips-tipi .chip").forEach(c => c.classList.toggle("sel", (p.tipi || []).includes(c.dataset.tipo)));
+  document.querySelectorAll("#chips-allergeni .chip").forEach(c => c.classList.toggle("sel", (p.allergeni || []).includes(c.dataset.allergene)));
+}
+
+/* ---------------------- SYNC: SPAZIO CONDIVISO ---------------------- */
+// Applica uno stato arrivato dallo spazio condiviso (altro dispositivo):
+// aggiorna piano e lista SENZA rimandare subito indietro la modifica.
+function applicaStatoRemoto(doc) {
+  if (!doc || !doc.prefs || !doc.celle || !doc.celle.length) return;
+  normalizzaPrefs(doc.prefs);
+  if (!doc.prefs.giorni) doc.prefs.giorni = 7;
+  STATE = {
+    prefs: doc.prefs,
+    celle: doc.celle,
+    spuntati: doc.spuntati || {}, spuntatiT: doc.spuntatiT || {},
+    giaInCasa: doc.giaInCasa || {}, giaInCasaT: doc.giaInCasaT || {},
+    // Le preferenze di sola vista restano personali di questo dispositivo.
+    raggruppa: STATE.raggruppa !== false,
+    filtroPasto: STATE.filtroPasto || "tutti",
+  };
+  const slotValidi = ["tutti", ...(STATE.prefs.slot || [])];
+  if (!slotValidi.includes(STATE.filtroPasto)) STATE.filtroPasto = "tutti";
+  potaChiaviOrfane(); // togli spunte/"ne ho già" di ingredienti non più nel piano (#12)
+  aggiornaControlliDaPrefs(STATE.prefs);
+  abilitaPiano();
+  renderTutto();
+  salvaInLocale(); // salva in locale senza far ripartire un push
+}
+
+function initSync() {
+  if (!window.SYNC) return;
+  SYNC.getLocal = () => ({
+    prefs: STATE.prefs, celle: STATE.celle,
+    spuntati: STATE.spuntati, spuntatiT: STATE.spuntatiT,
+    giaInCasa: STATE.giaInCasa, giaInCasaT: STATE.giaInCasaT,
+  });
+  SYNC.onRemote = applicaStatoRemoto;
+  SYNC.onExtra = (extra) => { if (Array.isArray(extra) && extra.length) salvaRicetteDaLink(extra); };
+  SYNC.onStato = renderSyncUI;
+  collegaEventiSync();
+  SYNC.init();
+  renderSyncUI(SYNC.stato, SYNC.codice);
+}
+
+function collegaEventiSync() {
+  const on = (id, ev, fn) => { const el = document.getElementById(id); if (el) el.addEventListener(ev, fn); };
+  on("btn-crea-spazio", "click", () => SYNC.collega(SYNC.nuovoCodice()));
+  on("btn-collega", "click", () => {
+    const v = (document.getElementById("sync-codice-input").value || "").trim();
+    if (!v) { alert("Inserisci il codice ricevuto."); return; }
+    SYNC.collega(v);
+  });
+  on("btn-scollega", "click", () => {
+    if (confirm("Scollegare questo dispositivo dallo spazio condiviso?\n(Il piano resta salvato qui, ma non si aggiornerà più insieme agli altri.)")) SYNC.scollega();
+  });
+  on("btn-copia-codice", "click", async () => {
+    try { await navigator.clipboard.writeText(SYNC.codice); alert("📋 Codice copiato: " + SYNC.codice); }
+    catch (e) { prompt("Copia il codice e mandalo all'altra persona:", SYNC.codice); }
+  });
+  on("btn-invita", "click", () => {
+    const link = location.origin + location.pathname;
+    const msg = `📲 Colleghiamoci sull'app del menu!\nApri: ${link}\nPoi inserisci il codice: ${SYNC.codice}`;
+    if (navigator.share) navigator.share({ title: "Il mio menu", text: msg }).catch(() => {});
+    else window.open("https://wa.me/?text=" + encodeURIComponent(msg), "_blank");
+  });
+}
+
+function renderSyncUI(stato, codice) {
+  const nonpronto = document.getElementById("sync-nonpronto");
+  const spento = document.getElementById("sync-spento");
+  const attivo = document.getElementById("sync-attivo");
+  if (!spento || !attivo || !nonpronto) return;
+
+  if (!(window.SYNC && SYNC.configurata())) {
+    nonpronto.style.display = "block";
+    spento.style.display = attivo.style.display = "none";
+    return;
+  }
+  nonpronto.style.display = "none";
+  const collegato = window.SYNC && SYNC.attiva;
+  spento.style.display = collegato ? "none" : "block";
+  attivo.style.display = collegato ? "block" : "none";
+  if (collegato) {
+    document.getElementById("sync-codice-vis").textContent = codice || SYNC.codice || "";
+    const mappa = {
+      attivo: "🟢 Sincronizzato — le modifiche si aggiornano su tutti i dispositivi collegati.",
+      collego: "🔄 Collegamento in corso…",
+      offline: "🟠 Offline: si sincronizza appena torni online.",
+      errore: "🔴 Problema di collegamento. Controlla la rete e riprova.",
+    };
+    document.getElementById("sync-stato-riga").textContent = mappa[stato] || "";
+  }
 }
