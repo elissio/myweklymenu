@@ -4,7 +4,7 @@
    (niente più cache vecchia), ma l'app funziona lo stesso anche offline.
    Bump di VERSIONE ad ogni rilascio: invalida la cache precedente.
    ========================================================================= */
-const VERSIONE = "v14";
+const VERSIONE = "v16";
 const CACHE = "menu-" + VERSIONE;
 
 // File del "guscio" dell'app: precaricati all'installazione così l'app parte anche offline.

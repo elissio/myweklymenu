@@ -3,7 +3,7 @@
    Tutto gira nel browser; i dati restano salvati sul dispositivo (localStorage).
    ========================================================================= */
 
-const APP_VERSION = "v14"; // mostrata in fondo alla pagina: serve a capire se il telefono ha l'ultima versione
+const APP_VERSION = "v16"; // mostrata in fondo alla pagina: serve a capire se il telefono ha l'ultima versione
 const GIORNI = ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"];
 const ORDINE_SLOT = ["colazione", "pranzo", "cena"];
 // Id delle ricette "di serie" (quelle in data.js + ricette-importate.js, cioè
@@ -134,6 +134,16 @@ function collegaEventi() {
   document.getElementById("btn-wa").addEventListener("click", inviaWhatsApp);
   document.getElementById("btn-copia-link").addEventListener("click", copiaLink);
   document.getElementById("btn-copia-testo").addEventListener("click", copiaListaTesto);
+
+  // Modalità estiva: mostra/nasconde lo slider e aggiorna l'etichetta della percentuale.
+  const tgEstiva = document.getElementById("tg-estiva");
+  const slider = document.getElementById("perc-fredde");
+  if (tgEstiva) tgEstiva.addEventListener("change", () => {
+    document.getElementById("riga-perc-fredde").style.display = tgEstiva.checked ? "block" : "none";
+  });
+  if (slider) slider.addEventListener("input", () => {
+    document.getElementById("perc-fredde-val").textContent = slider.value + "%";
+  });
 }
 
 /* ---------------------- TEMA ---------------------- */
@@ -177,6 +187,8 @@ function leggiPreferenze() {
     nientePiccante: document.getElementById("tg-piccante").checked,
     soloStagione: document.getElementById("tg-stagione").checked,
     cucinaDoppio: document.getElementById("tg-batch").checked,
+    estiva: document.getElementById("tg-estiva").checked,
+    percFredde: Math.max(0, Math.min(100, parseInt(document.getElementById("perc-fredde").value) || 0)),
     dataInizio: oggiISO(),
   };
 }
@@ -197,6 +209,9 @@ function stagioneCorrente() {
 }
 
 function getSupermercato(id) { return SUPERMERCATI.find(s => s.id === id) || SUPERMERCATI[0]; }
+
+/* Una ricetta è "fresca" se non richiede cottura (nessun elettrodomestico). */
+function eFresca(r) { return !r.attrezzatura || r.attrezzatura.length === 0; }
 
 /* Una ricetta è valida per uno slot date le preferenze? */
 function ricettaValida(r, slot, prefs) {
@@ -259,6 +274,18 @@ function generaPiano() {
   const cucinaDoppio = prefs.cucinaDoppio && prefs.slot.includes("pranzo") && prefs.slot.includes("cena");
   const poolCenaPranzo = cucinaDoppio ? pools["cena"].filter(r => ricettaValida(r, "pranzo", prefs)) : null;
 
+  // Modalità estiva: quota di pranzi/cene "freschi" (senza cottura). Per ogni
+  // pranzo/cena scelto, vuoiFresca() decide se pescare tra i piatti freschi o
+  // tra quelli cucinati, mantenendo la percentuale richiesta sul totale.
+  const estiva = prefs.estiva;
+  const percFredde = Math.max(0, Math.min(100, prefs.percFredde != null ? prefs.percFredde : 50));
+  let mainFatti = 0, freschiFatti = 0;
+  const vuoiFresca = () => {
+    mainFatti++;
+    if (freschiFatti < (percFredde / 100) * mainFatti - 1e-9) { freschiFatti++; return true; }
+    return false;
+  };
+
   // La colazione pesa meno di pranzo/cena: così pranzo e cena ricevono più
   // budget e possono ospitare piatti più proteici restando nel totale.
   const PESO = { colazione: 0.7, pranzo: 1.35, cena: 1.35 };
@@ -286,7 +313,14 @@ function generaPiano() {
 
       // Le cene che faranno da pranzo domani: scegli tra quelle valide per entrambi.
       const portaDomani = cucinaDoppio && slot === "cena" && !ultimoGiorno;
-      const pool = (portaDomani && poolCenaPranzo.length) ? poolCenaPranzo : pools[slot];
+      let pool = (portaDomani && poolCenaPranzo.length) ? poolCenaPranzo : pools[slot];
+      // Modalità estiva: per pranzo/cena scegli tra piatti freschi o cucinati
+      // secondo la quota; se la categoria richiesta è vuota, usa comunque il pool.
+      if (estiva && (slot === "pranzo" || slot === "cena")) {
+        const vuoleFresca = vuoiFresca();
+        const sub = pool.filter(r => eFresca(r) === vuoleFresca);
+        if (sub.length) pool = sub;
+      }
       const target = pesoRimanente > 0 ? Math.max(0, (prefs.budget - speso) * (w / pesoRimanente)) : 0;
       const r = scegliRicetta(pool, usage, usateOggi, target, prefs);
       usage[r.id] = (usage[r.id] || 0) + 1;
@@ -1109,6 +1143,11 @@ function aggiornaControlliDaPrefs(p) {
   document.getElementById("tg-piccante").checked = p.nientePiccante !== false;
   document.getElementById("tg-stagione").checked = p.soloStagione !== false;
   document.getElementById("tg-batch").checked = p.cucinaDoppio !== false;
+  document.getElementById("tg-estiva").checked = !!p.estiva;
+  const _perc = (typeof p.percFredde === "number") ? p.percFredde : 50;
+  document.getElementById("perc-fredde").value = _perc;
+  document.getElementById("perc-fredde-val").textContent = _perc + "%";
+  document.getElementById("riga-perc-fredde").style.display = p.estiva ? "block" : "none";
   document.querySelectorAll("#chips-slot .chip").forEach(c => c.classList.toggle("sel", (p.slot || []).includes(c.dataset.slot)));
   document.querySelectorAll("#equip-grid .equip").forEach(c => c.classList.toggle("sel", (p.equip || []).includes(c.dataset.equip)));
   document.querySelectorAll("#chips-tipi .chip").forEach(c => c.classList.toggle("sel", (p.tipi || []).includes(c.dataset.tipo)));
